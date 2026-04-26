@@ -133,14 +133,16 @@ log "[1/7] Subdomain enumeration"
 subfinder -d "$TARGET" -all -recursive -silent | anew subdomains.txt >/dev/null || warn "subfinder failed"
 
 # crt.sh — handle multi-line name_value, filter wildcards, scope-check
-curl -s --max-time 30 -A "$(random_ua)" "https://crt.sh/?q=%25.${TARGET}&output=json" \
-    | jq -r '.[]?.name_value' 2>/dev/null \
-    | tr ',' '\n' \
-    | sed 's/\*\.//g' \
-    | tr '[:upper:]' '[:lower:]' \
-    | grep -E "(^|\.)${TARGET//./\\.}\$" \
-    | sort -u \
-    | anew subdomains.txt >/dev/null || warn "crt.sh fetch failed"
+{
+    curl -s --max-time 30 -A "$(random_ua)" "https://crt.sh/?q=%25.${TARGET}&output=json" \
+        | jq -r '.[]?.name_value' 2>/dev/null \
+        | tr ',' '\n' \
+        | sed 's/\*\.//g' \
+        | tr '[:upper:]' '[:lower:]' \
+        | { grep -E "(^|\.)${TARGET//./\\.}\$" || true; } \
+        | sort -u \
+        | anew subdomains.txt >/dev/null
+} || warn "crt.sh fetch failed"
 
 ok "Subdomains: $(wc -l < subdomains.txt)"
 
@@ -150,7 +152,7 @@ ok "Subdomains: $(wc -l < subdomains.txt)"
 log "[2/7] DNS resolution"
 : > resolved.txt
 if [[ -s subdomains.txt ]]; then
-    dnsx -l subdomains.txt -silent -a -resp -o resolved.txt || warn "dnsx failed"
+    dnsx -l subdomains.txt -silent -nc -a -resp -o resolved.txt >/dev/null 2>&1 || warn "dnsx failed"
     awk '{print $1}' resolved.txt | sort -u > resolved_hosts.txt
     ok "Resolved: $(wc -l < resolved_hosts.txt)"
 else
@@ -167,9 +169,9 @@ log "[3/7] Probing live hosts"
 if [[ -s resolved_hosts.txt ]]; then
     httpx -l resolved_hosts.txt \
         -H "User-Agent: $(random_ua)" \
-        -silent -title -tech-detect -status-code -web-server -cdn \
+        -silent -nc -title -tech-detect -status-code -web-server -cdn \
         -threads "$THREADS" -timeout 12 -rate-limit "$RATE_LIMIT" \
-        -o live_hosts.txt || warn "httpx failed"
+        -o live_hosts.txt >/dev/null 2>&1 || warn "httpx failed"
 
     # URL-only list for downstream tools
     awk '{print $1}' live_hosts.txt | sort -u > live_urls.txt
@@ -196,18 +198,22 @@ fi
 
 : > js_files.txt
 if [[ -s live_urls.txt ]]; then
-    katana -list live_urls.txt -jc -d 4 -silent 2>/dev/null \
-        | grep -Ei "\.js(\?|$)|\.json(\?|$)" \
-        | sort -u \
-        | anew js_files.txt >/dev/null || warn "katana failed"
+    {
+        katana -list live_urls.txt -jc -d 4 -silent -nc 2>/dev/null \
+            | { grep -Ei "\.js(\?|$)|\.json(\?|$)" || true; } \
+            | sort -u \
+            | anew js_files.txt >/dev/null
+    } || warn "katana failed"
 fi
 
 # Also pull JS URLs from wayback/gau
 if [[ -s wayback.txt || -s gau.txt ]]; then
-    cat wayback.txt gau.txt 2>/dev/null \
-        | grep -Ei "\.js(\?|$)" \
-        | sort -u \
-        | anew js_files.txt >/dev/null || true
+    {
+        cat wayback.txt gau.txt 2>/dev/null \
+            | { grep -Ei "\.js(\?|$)" || true; } \
+            | sort -u \
+            | anew js_files.txt >/dev/null
+    } || true
 fi
 
 ok "JS files: $(wc -l < js_files.txt)"
@@ -263,7 +269,7 @@ if [[ -s live_urls.txt ]]; then
         -severity critical,high,medium \
         -tags exposure,misconfig,secrets,cloud \
         -rate-limit "$RATE_LIMIT" \
-        -silent -o nuclei_results.txt || warn "nuclei failed"
+        -silent -nc -o nuclei_results.txt >/dev/null 2>&1 || warn "nuclei failed"
 fi
 ok "Nuclei findings: $(wc -l < nuclei_results.txt)"
 
