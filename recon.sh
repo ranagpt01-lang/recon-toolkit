@@ -53,7 +53,7 @@ die()  { printf "${c_red}[x]${c_reset} %s\n" "$*" >&2; exit 1; }
 ok()   { printf "${c_green}[+]${c_reset} %s\n" "$*"; }
 
 # ---------- Dependency check ----------
-REQUIRED=(subfinder dnsx httpx katana nuclei jq anew curl)
+REQUIRED=(subfinder dnsx httpx katana nuclei jq anew curl shuf xargs)
 OPTIONAL=(gau waybackurls)
 
 missing=()
@@ -103,17 +103,22 @@ mkdir -p "$OUTPUT"
 cd "$OUTPUT"
 
 # ---------- User-Agent rotation ----------
-USER_AGENTS=(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
+# A UA list is written to a temp file so child processes (xargs subshells)
+# can pick a fresh UA per request — bash arrays do NOT survive `export`.
+UA_FILE="$(mktemp -t recon_ua.XXXXXX)"
+trap 'rm -f "$UA_FILE"' EXIT INT TERM
+cat > "$UA_FILE" <<'EOF'
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36
+Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15
+Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1
+EOF
+export UA_FILE
 
 random_ua() {
-    printf '%s' "${USER_AGENTS[$((RANDOM % ${#USER_AGENTS[@]}))]}"
+    shuf -n 1 "$UA_FILE"
 }
 
 UA_INITIAL="$(random_ua)"
@@ -132,6 +137,7 @@ curl -s --max-time 30 -A "$(random_ua)" "https://crt.sh/?q=%25.${TARGET}&output=
     | jq -r '.[]?.name_value' 2>/dev/null \
     | tr ',' '\n' \
     | sed 's/\*\.//g' \
+    | tr '[:upper:]' '[:lower:]' \
     | grep -E "(^|\.)${TARGET//./\\.}\$" \
     | sort -u \
     | anew subdomains.txt >/dev/null || warn "crt.sh fetch failed"
@@ -142,6 +148,7 @@ ok "Subdomains: $(wc -l < subdomains.txt)"
 # 2. DNS resolution
 # ============================================================================
 log "[2/7] DNS resolution"
+: > resolved.txt
 if [[ -s subdomains.txt ]]; then
     dnsx -l subdomains.txt -silent -a -resp -o resolved.txt || warn "dnsx failed"
     awk '{print $1}' resolved.txt | sort -u > resolved_hosts.txt
@@ -155,6 +162,8 @@ fi
 # 3. Live host probing + tech detection
 # ============================================================================
 log "[3/7] Probing live hosts"
+: > live_hosts.txt
+: > live_urls.txt
 if [[ -s resolved_hosts.txt ]]; then
     httpx -l resolved_hosts.txt \
         -H "User-Agent: $(random_ua)" \
@@ -167,8 +176,6 @@ if [[ -s resolved_hosts.txt ]]; then
     ok "Live: $(wc -l < live_urls.txt)"
 else
     warn "No hosts to probe"
-    : > live_hosts.txt
-    : > live_urls.txt
 fi
 
 sleep "$DELAY"
@@ -217,21 +224,20 @@ log "[5/7] JS secret hunting"
 SECRET_REGEX='(api[_-]?key|secret|token|aws_access_key|aws_secret|s3\.amazonaws|firebase|bearer\s+[a-z0-9._-]+|client[_-]?secret|private[_-]?key|-----BEGIN [A-Z ]+ PRIVATE KEY-----)'
 
 if [[ -s js_files.txt ]]; then
-    # Export so subshell sees it
     export SECRET_REGEX
     fetch_one() {
         local url="$1"
-        local ua="${USER_AGENTS[$((RANDOM % ${#USER_AGENTS[@]}))]}"
+        local ua
+        ua="$(shuf -n 1 "$UA_FILE")"
         curl -s --max-time 10 -A "$ua" "$url" \
             | grep -aiEo ".{0,40}${SECRET_REGEX}.{0,80}" \
             | sed "s|^|${url}: |" || true
     }
     export -f fetch_one
-    export USER_AGENTS
 
     # Parallelism: 10 in stealth, 30 in fast
     PAR=$([[ "$STEALTH_MODE" == true ]] && echo 10 || echo 30)
-    xargs -a js_files.txt -n 1 -P "$PAR" -I {} bash -c 'fetch_one "$@"' _ {} \
+    xargs -a js_files.txt -P "$PAR" -I {} bash -c 'fetch_one "$@"' _ {} \
         >> secrets_raw.txt 2>/dev/null || true
 fi
 
