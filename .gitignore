@@ -1,0 +1,14 @@
+# Recon output directories
+recon_*/
+output/
+*.log
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local secrets / configs
+.env
+*.local
