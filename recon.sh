@@ -53,16 +53,53 @@ die()  { printf "${c_red}[x]${c_reset} %s\n" "$*" >&2; exit 1; }
 ok()   { printf "${c_green}[+]${c_reset} %s\n" "$*"; }
 
 # ---------- Dependency check ----------
-REQUIRED=(subfinder dnsx httpx katana nuclei jq anew curl shuf xargs)
-OPTIONAL=(gau waybackurls)
+# ProjectDiscovery tools can collide with same-named binaries from other
+# packages (e.g. Python httpx on Kali, anew with name collisions, etc.).
+# Resolve each PD tool to a binary that actually responds to '-version' so
+# we never accidentally invoke the wrong one.
 
+GOBIN_DIR="${GOBIN:-${GOPATH:-$HOME/go}/bin}"
+
+# resolve_pd_tool <name> -> prints absolute path to a working PD binary, or
+# empty string if none found. Tries PATH first, then $GOBIN_DIR/<name>.
+resolve_pd_tool() {
+    local tool="$1"
+    local cand
+    for cand in "$(command -v "$tool" 2>/dev/null || true)" "$GOBIN_DIR/$tool"; do
+        [[ -n "$cand" && -x "$cand" ]] || continue
+        # PD tools accept '-version' and exit 0; foreign binaries (e.g. Python
+        # httpx) error out on '-version', which is exactly what we want here.
+        if "$cand" -version >/dev/null 2>&1; then
+            printf '%s' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+PD_TOOLS=(subfinder dnsx httpx katana nuclei)
+declare -A PD_BIN=()
 missing=()
-for tool in "${REQUIRED[@]}"; do
+for tool in "${PD_TOOLS[@]}"; do
+    if path="$(resolve_pd_tool "$tool")"; then
+        PD_BIN["$tool"]="$path"
+        # Warn if PATH version is shadowed (informational only).
+        path_bin="$(command -v "$tool" 2>/dev/null || true)"
+        if [[ -n "$path_bin" && "$path_bin" != "$path" ]]; then
+            warn "PATH \`$tool\` ($path_bin) is not the ProjectDiscovery one; using $path instead"
+        fi
+    else
+        missing+=("$tool")
+    fi
+done
+
+# Non-PD required tools
+for tool in jq anew curl shuf xargs; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 
 if (( ${#missing[@]} > 0 )); then
-    die "Missing required tools: ${missing[*]}
+    die "Missing or broken required tools: ${missing[*]}
 Install via:
   go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
   go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -70,9 +107,17 @@ Install via:
   go install -v github.com/projectdiscovery/katana/cmd/katana@latest
   go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
   go install -v github.com/tomnomnom/anew@latest
-  apt install -y jq curl"
+  sudo apt install -y jq curl coreutils findutils
+Then ensure \$HOME/go/bin is on your PATH (or set \$GOBIN)."
 fi
 
+SUBFINDER_BIN="${PD_BIN[subfinder]}"
+DNSX_BIN="${PD_BIN[dnsx]}"
+HTTPX_BIN="${PD_BIN[httpx]}"
+KATANA_BIN="${PD_BIN[katana]}"
+NUCLEI_BIN="${PD_BIN[nuclei]}"
+
+OPTIONAL=(gau waybackurls)
 for tool in "${OPTIONAL[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || warn "Optional tool not found: $tool (related step will be skipped)"
 done
@@ -130,7 +175,7 @@ log "Initial UA: ${UA_INITIAL:0:60}..."
 log "[1/7] Subdomain enumeration"
 : > subdomains.txt
 
-subfinder -d "$TARGET" -all -recursive -silent | anew subdomains.txt >/dev/null || warn "subfinder failed"
+"$SUBFINDER_BIN" -d "$TARGET" -all -recursive -silent | anew subdomains.txt >/dev/null || warn "subfinder failed"
 
 # crt.sh — handle multi-line name_value, filter wildcards, scope-check
 {
@@ -152,7 +197,7 @@ ok "Subdomains: $(wc -l < subdomains.txt)"
 log "[2/7] DNS resolution"
 : > resolved.txt
 if [[ -s subdomains.txt ]]; then
-    dnsx -l subdomains.txt -silent -nc -a -resp -o resolved.txt >/dev/null 2>dnsx.err || warn "dnsx failed (see dnsx.err)"
+    "$DNSX_BIN" -l subdomains.txt -silent -nc -a -resp -o resolved.txt >/dev/null 2>dnsx.err || warn "dnsx failed (see dnsx.err)"
     awk '{print $1}' resolved.txt | sort -u > resolved_hosts.txt
     ok "Resolved: $(wc -l < resolved_hosts.txt)"
 else
@@ -167,7 +212,7 @@ log "[3/7] Probing live hosts"
 : > live_hosts.txt
 : > live_urls.txt
 if [[ -s resolved_hosts.txt ]]; then
-    httpx -l resolved_hosts.txt \
+    "$HTTPX_BIN" -l resolved_hosts.txt \
         -H "User-Agent: $(random_ua)" \
         -silent -nc -title -tech-detect -status-code -web-server -cdn \
         -threads "$THREADS" -timeout 12 -rate-limit "$RATE_LIMIT" \
@@ -199,7 +244,7 @@ fi
 : > js_files.txt
 if [[ -s live_urls.txt ]]; then
     {
-        katana -list live_urls.txt -jc -d 4 -silent -nc 2>/dev/null \
+        "$KATANA_BIN" -list live_urls.txt -jc -d 4 -silent -nc 2>/dev/null \
             | { grep -Ei "\.js(\?|$)|\.json(\?|$)" || true; } \
             | sort -u \
             | anew js_files.txt >/dev/null
@@ -260,11 +305,11 @@ log "[6/7] Nuclei scanning"
 NUCLEI_TEMPLATES="${NUCLEI_TEMPLATES:-$HOME/nuclei-templates}"
 if [[ ! -d "$NUCLEI_TEMPLATES" ]]; then
     warn "Nuclei templates not found at $NUCLEI_TEMPLATES — running update"
-    nuclei -update-templates -silent || warn "Failed to update templates"
+    "$NUCLEI_BIN" -update-templates -silent || warn "Failed to update templates"
 fi
 
 if [[ -s live_urls.txt ]]; then
-    nuclei -l live_urls.txt \
+    "$NUCLEI_BIN" -l live_urls.txt \
         -H "User-Agent: $(random_ua)" \
         -severity critical,high,medium \
         -tags exposure,misconfig,secrets,cloud \
