@@ -152,7 +152,7 @@ ok "Subdomains: $(wc -l < subdomains.txt)"
 log "[2/7] DNS resolution"
 : > resolved.txt
 if [[ -s subdomains.txt ]]; then
-    dnsx -l subdomains.txt -silent -nc -a -resp -o resolved.txt >/dev/null 2>&1 || warn "dnsx failed"
+    dnsx -l subdomains.txt -silent -nc -a -resp -o resolved.txt >/dev/null 2>dnsx.err || warn "dnsx failed (see dnsx.err)"
     awk '{print $1}' resolved.txt | sort -u > resolved_hosts.txt
     ok "Resolved: $(wc -l < resolved_hosts.txt)"
 else
@@ -171,7 +171,7 @@ if [[ -s resolved_hosts.txt ]]; then
         -H "User-Agent: $(random_ua)" \
         -silent -nc -title -tech-detect -status-code -web-server -cdn \
         -threads "$THREADS" -timeout 12 -rate-limit "$RATE_LIMIT" \
-        -o live_hosts.txt >/dev/null 2>&1 || warn "httpx failed"
+        -o live_hosts.txt >/dev/null 2>httpx.err || warn "httpx failed (see httpx.err)"
 
     # URL-only list for downstream tools
     awk '{print $1}' live_hosts.txt | sort -u > live_urls.txt
@@ -269,7 +269,7 @@ if [[ -s live_urls.txt ]]; then
         -severity critical,high,medium \
         -tags exposure,misconfig,secrets,cloud \
         -rate-limit "$RATE_LIMIT" \
-        -silent -nc -o nuclei_results.txt >/dev/null 2>&1 || warn "nuclei failed"
+        -silent -nc -o nuclei_results.txt >/dev/null 2>nuclei.err || warn "nuclei failed (see nuclei.err)"
 fi
 ok "Nuclei findings: $(wc -l < nuclei_results.txt)"
 
