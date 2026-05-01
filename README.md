@@ -40,13 +40,46 @@ Required:
 - [`katana`](https://github.com/projectdiscovery/katana)
 - [`nuclei`](https://github.com/projectdiscovery/nuclei)
 - [`anew`](https://github.com/tomnomnom/anew)
-- `jq`, `curl`
+- `jq`, `curl`, `shuf`, `xargs` (typically present on any Linux/macOS box)
+- Go ≥ 1.21 (only needed for installing the PD / tomnomnom tools)
 
 Optional (script will skip the related steps if missing):
 - [`gau`](https://github.com/lc/gau)
 - [`waybackurls`](https://github.com/tomnomnom/waybackurls)
 
-Install everything in one go:
+## Installation
+
+### 1. Install Go (skip if you already have it)
+
+**Kali / Debian / Ubuntu:**
+```bash
+sudo apt update
+sudo apt install -y golang-go jq curl
+```
+
+**Verify:**
+```bash
+go version    # should print go1.21+ or newer
+```
+
+### 2. Make sure `$HOME/go/bin` is on your PATH
+
+`go install` puts binaries in `$HOME/go/bin`. Add it to your shell rc once:
+
+```bash
+# zsh (Kali default)
+echo 'export PATH=$HOME/go/bin:$PATH' >> ~/.zshrc && source ~/.zshrc
+
+# bash
+echo 'export PATH=$HOME/go/bin:$PATH' >> ~/.bashrc && source ~/.bashrc
+```
+
+> Note: the script auto-detects ProjectDiscovery binaries even if your distro
+> ships a same-named binary that shadows them (e.g. `apt`'s Python `httpx` on
+> Kali). PATH ordering is **not strictly required** — but having `~/go/bin`
+> first avoids an extra warning at startup.
+
+### 3. Install the recon tools
 
 ```bash
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -57,8 +90,62 @@ go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 go install -v github.com/tomnomnom/anew@latest
 go install -v github.com/tomnomnom/waybackurls@latest
 go install -v github.com/lc/gau/v2/cmd/gau@latest
-sudo apt install -y jq curl
+```
+
+First run downloads ~150+ Go packages; expect 5–15 min on a fast connection.
+
+### 4. Pull nuclei templates
+
+```bash
 nuclei -update-templates
+```
+
+### 5. Clone this repo and run
+
+```bash
+git clone https://github.com/ranagpt01-lang/recon-toolkit.git
+cd recon-toolkit
+chmod +x recon.sh
+./recon.sh example.com --fast
+```
+
+### 6. (Optional) Install system-wide
+
+If you want to call `recon.sh` from any directory:
+
+```bash
+sudo ln -s "$PWD/recon.sh" /usr/local/bin/recon
+recon example.com --fast
+```
+
+### 7. Verify everything is wired up
+
+```bash
+for t in subfinder dnsx httpx katana nuclei anew waybackurls gau jq curl shuf xargs; do
+  command -v $t >/dev/null && echo "[OK]   $t" || echo "[MISS] $t"
+done
+```
+
+All required tools should show `[OK]`. If any show `[MISS]`, re-run the
+corresponding `go install` line from step 3.
+
+## Updating
+
+```bash
+cd ~/recon-toolkit
+git pull                     # pull latest recon.sh
+nuclei -update-templates     # refresh template DB
+```
+
+To update the underlying tools, re-run the `go install ...@latest` block from
+step 3.
+
+## Uninstalling
+
+```bash
+rm -rf ~/recon-toolkit
+rm -f $HOME/go/bin/{subfinder,dnsx,httpx,katana,nuclei,anew,waybackurls,gau}
+sudo rm -f /usr/local/bin/recon   # only if you symlinked in step 6
 ```
 
 ## Usage
